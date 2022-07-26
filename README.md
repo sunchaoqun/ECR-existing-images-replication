@@ -182,3 +182,167 @@ response = client.start_build(
 )
 ```
 
+=============================================== 创建策略，并且替换对应的Account ID，区域，还有对应的Code Build的名字，此IAM策略在预迁移的账户中 ================================================
+
+```
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Resource": [
+                "arn:aws:logs:eu-west-1:925352035051:log-group:/aws/codebuild/ecr-replication-build",
+                "arn:aws:logs:eu-west-1:925352035051:log-group:/aws/codebuild/ecr-replication-build:*"
+            ],
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Resource": [
+                "arn:aws:s3:::codepipeline-eu-west-1-*"
+            ],
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:GetObjectVersion",
+                "s3:GetBucketAcl",
+                "s3:GetBucketLocation"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "codebuild:CreateReportGroup",
+                "codebuild:CreateReport",
+                "codebuild:UpdateReport",
+                "codebuild:BatchPutTestCases",
+                "codebuild:BatchPutCodeCoverages"
+            ],
+            "Resource": [
+                "arn:aws:codebuild:eu-west-1:925352035051:report-group/ecr-replication-build-*"
+            ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ecr:GetAuthorizationToken",
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer",
+                "sts:AssumeRole"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+```
+
+创建角色并且绑定此策略，服务选择 Code Build，记录新创建Role的ARN
+
+创建 Code Build Project
+
+可以通过Cli的命令创建创建
+
+```
+aws codebuild create-project \
+    --name "ecr-replication-build" \
+    --source "{\"type\": \"GITHUB\",\"location\": \"https://github.com/sunchaoqun/ECR-existing-images-replication\"}" \
+    --artifacts {"\"type\": \"NO_ARTIFACTS\""} \
+    --environment file://env.txt \
+    --service-role "arn:aws:iam::xxxx:role/service-role/xxxxxxx"
+```
+
+env.txt 文件如下，替换对应的区域迁移至的区域和Account ID 和 目标账户的角色ARN
+
+```
+
+{
+    "type": "LINUX_CONTAINER",
+    "image": "aws/codebuild/amazonlinux2-x86_64-standard:3.0",
+    "computeType": "BUILD_GENERAL1_SMALL",
+    "environmentVariables": [
+        {
+            "name": "dest_region",
+            "value": "ap-southeast-1",
+            "type": "PLAINTEXT"
+        },
+        {
+            "name": "dest_account",
+            "value": "93242322XXXX",
+            "type": "PLAINTEXT"
+        },
+        {
+            "name": "dest_role",
+            "value": "arn:aws:iam::93242322XXXX:role/Admin",
+            "type": "PLAINTEXT"
+        },
+        {
+            "name": "src_account",
+            "value": "92535203YYYY",
+            "type": "PLAINTEXT"
+        }
+    ],
+    "privilegedMode": true,
+    "imagePullCredentialsType": "CODEBUILD"
+}
+```
+
+我们可以根据名字去更新Project 
+  
+```
+aws codebuild update-project \
+    --name "ecr-replication-build" \
+    --environment file://env.txt --region eu-west-1
+
+```
+
+创建成功后可以通过Python程序去执行迁移动作，代码会迁移所有Image，根据您与迁移的Image，进行相关代码调整。
+
+```
+import time
+import boto3
+import json
+
+region = "eu-west-1"
+
+ecrClient = boto3.client('ecr', region_name=region)
+codebuildClient = boto3.client('codebuild', region_name=region)
+
+repositories = ecrClient.describe_repositories()
+
+for repository in repositories["repositories"]:
+    # print(repository["repositoryName"])
+    images = ecrClient.describe_images(repositoryName=repository["repositoryName"],)
+    for image in images["imageDetails"]:
+        if "imageTags"  in image.keys():
+            print(image["repositoryName"] + " -> " + image["imageTags"][0])
+
+            # if image["repositoryName"] == "ab2-app" and image["imageTags"][0] == "latest":
+            if True:
+                response = codebuildClient.start_build(
+                    projectName='ecr-replication-build',
+                    environmentVariablesOverride=[
+                        {
+                            'name': 'ECR_REPO_NAME',
+                            'value': image["repositoryName"],
+                            'type': 'PLAINTEXT'
+                        },
+                        {
+                            'name': 'ECR_REPO_TAG',
+                            'value': image["imageTags"][0],
+                            'type': 'PLAINTEXT'
+                        },
+                    ]
+                )
+
+                print(response)
+
+        # else:
+        #     print(image["repositoryName"] + " -> " + "<untagged>")
+
+
+```
+
